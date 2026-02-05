@@ -9,9 +9,10 @@ logger = logging.getLogger(__name__)
 class MessageAnalyzer:
     """Анализатор входящих и исходящих сообщений"""
 
-    def __init__(self, manager_id: str, manager_name: str):
+    def __init__(self, manager_id: str, manager_name: str, telegram_client):
         self.manager_id = manager_id
         self.manager_name = manager_name
+        self.telegram_client = telegram_client
         self.response_times = {}  # client_id -> last_client_message_time
 
     async def analyze_incoming_message(self, event):
@@ -20,8 +21,8 @@ class MessageAnalyzer:
             client_id = event.sender_id
             message_time = datetime.now()
 
-            # Определяем, новый ли это клиент
-            is_new = await is_new_client(client_id, self.manager_id, NEW_CLIENT_HOURS)
+            # Определяем, новый ли это клиент (проверяем реальную историю в Telegram)
+            is_new = await is_new_client(client_id, self.manager_id, NEW_CLIENT_HOURS, self.telegram_client)
 
             # Получаем историю для определения источника
             history = await get_client_history(client_id, self.manager_id)

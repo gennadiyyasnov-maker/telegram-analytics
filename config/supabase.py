@@ -60,27 +60,51 @@ async def get_client_history(client_telegram_id: int, manager_id: str):
         logger.error(f"Ошибка получения истории: {e}")
         return []
 
-async def is_new_client(client_telegram_id: int, manager_id: str, hours: int = 24):
+async def is_new_client(client_telegram_id: int, manager_id: str, hours: int = 24, telegram_client=None):
     """
     Проверить, новый ли это клиент
 
-    НОВАЯ ЛОГИКА:
-    - Новый клиент = пишет ПЕРВЫЙ РАЗ (никогда не было переписки с этим менеджером)
-    - Повторный клиент = уже есть любая история переписки, независимо от времени
+    ПРАВИЛЬНАЯ ЛОГИКА:
+    1. Проверяем реальную историю переписок в Telegram
+    2. Если есть хоть одно сообщение в истории (кроме текущего) - это ПОВТОРНЫЙ клиент
+    3. Если история пустая или только одно сообщение - это НОВЫЙ клиент
+
+    Параметры:
+    - client_telegram_id: ID клиента
+    - manager_id: ID менеджера (не используется для Telegram, но для логов)
+    - hours: не используется в новой логике
+    - telegram_client: клиент Telethon для проверки истории
     """
     try:
-        # Проверяем есть ли ВООБЩЕ какая-то история с этим клиентом
-        result = supabase.table('telegram_conversations').select('id').eq(
-            'client_telegram_id', client_telegram_id
-        ).eq('manager_id', manager_id).limit(1).execute()
-
-        # Если нет истории вообще - это новый клиент
-        is_new = len(result.data) == 0
-
-        if is_new:
-            logger.info(f"🆕 Новый клиент: {client_telegram_id}")
+        if not telegram_client:
+            logger.warning("⚠️ Telegram client не передан, проверяем по БД")
+            # Fallback на старую логику если клиент не передан
+            result = supabase.table('telegram_conversations').select('id').eq(
+                'client_telegram_id', client_telegram_id
+            ).eq('manager_id', manager_id).limit(1).execute()
+            is_new = len(result.data) == 0
         else:
-            logger.info(f"🔄 Повторный клиент: {client_telegram_id}")
+            # НОВАЯ ЛОГИКА: Проверяем реальную историю в Telegram
+            try:
+                # Получаем последние 2 сообщения из чата с этим клиентом
+                messages = await telegram_client.get_messages(client_telegram_id, limit=2)
+
+                # Если сообщений меньше 2 (только текущее или вообще нет) - новый клиент
+                # Если 2 или больше - уже была переписка, значит повторный
+                is_new = len(messages) < 2
+
+                if is_new:
+                    logger.info(f"🆕 Новый клиент {client_telegram_id}: только {len(messages)} сообщение(й) в истории")
+                else:
+                    logger.info(f"🔄 Повторный клиент {client_telegram_id}: {len(messages)}+ сообщений в истории")
+
+            except Exception as telegram_error:
+                logger.warning(f"⚠️ Не удалось получить историю из Telegram для {client_telegram_id}: {telegram_error}")
+                # Fallback на проверку по БД
+                result = supabase.table('telegram_conversations').select('id').eq(
+                    'client_telegram_id', client_telegram_id
+                ).eq('manager_id', manager_id).limit(1).execute()
+                is_new = len(result.data) == 0
 
         return is_new
     except Exception as e:

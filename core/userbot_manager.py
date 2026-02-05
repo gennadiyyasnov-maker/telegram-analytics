@@ -24,8 +24,8 @@ class UserbotManager:
         # Создаем клиента
         self.client = TelegramClient(str(session_file), api_id, api_hash)
 
-        # Анализатор сообщений
-        self.analyzer = MessageAnalyzer(manager_id, manager_name)
+        # Анализатор сообщений (передаем client для проверки истории)
+        self.analyzer = MessageAnalyzer(manager_id, manager_name, self.client)
 
         # Статус
         self.is_running = False
