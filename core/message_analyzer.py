@@ -60,6 +60,17 @@ class MessageAnalyzer:
 
             message_time = datetime.now()
 
+            # Получаем последнее входящее сообщение от этого клиента
+            # чтобы узнать был ли он новым
+            history = await get_client_history(client_id, self.manager_id)
+            is_new_for_stats = False
+
+            # Ищем последнее входящее сообщение
+            for msg in history:
+                if msg.get('message_type') == 'incoming':
+                    is_new_for_stats = msg.get('is_new_client', False)
+                    break
+
             # Рассчитываем время ответа
             response_time_minutes = None
             if client_id in self.response_times:
@@ -74,13 +85,16 @@ class MessageAnalyzer:
                 'client_telegram_id': client_id,
                 'message_time': message_time.isoformat(),
                 'message_type': 'outgoing',
+                'is_new_client': is_new_for_stats,  # Берем из последнего входящего
                 'response_time_minutes': response_time_minutes,
                 'message_text': event.message.text[:200] if event.message and event.message.text else None
             }
 
             await save_conversation(data)
 
-            logger.info(f"📤 [{self.manager_name}] Исходящее клиенту {client_id} (время ответа: {response_time_minutes:.1f} мин)")
+            response_info = f"{response_time_minutes:.1f} мин" if response_time_minutes else "нет данных"
+            client_type = "новый" if is_new_for_stats else "повторный"
+            logger.info(f"📤 [{self.manager_name}] Исходящее клиенту {client_id} ({client_type}, время ответа: {response_info})")
 
         except Exception as e:
             logger.error(f"Ошибка анализа исходящего сообщения: {e}")

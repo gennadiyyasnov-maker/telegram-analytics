@@ -61,19 +61,28 @@ async def get_client_history(client_telegram_id: int, manager_id: str):
         return []
 
 async def is_new_client(client_telegram_id: int, manager_id: str, hours: int = 24):
-    """Проверить, новый ли это клиент (не писал более N часов)"""
+    """
+    Проверить, новый ли это клиент
+
+    НОВАЯ ЛОГИКА:
+    - Новый клиент = пишет ПЕРВЫЙ РАЗ (никогда не было переписки с этим менеджером)
+    - Повторный клиент = уже есть любая история переписки, независимо от времени
+    """
     try:
-        from datetime import datetime, timedelta
-
-        cutoff_time = datetime.now() - timedelta(hours=hours)
-
-        result = supabase.table('telegram_conversations').select('*').eq(
+        # Проверяем есть ли ВООБЩЕ какая-то история с этим клиентом
+        result = supabase.table('telegram_conversations').select('id').eq(
             'client_telegram_id', client_telegram_id
-        ).eq('manager_id', manager_id).gte(
-            'message_time', cutoff_time.isoformat()
-        ).execute()
+        ).eq('manager_id', manager_id).limit(1).execute()
 
-        return len(result.data) == 0
+        # Если нет истории вообще - это новый клиент
+        is_new = len(result.data) == 0
+
+        if is_new:
+            logger.info(f"🆕 Новый клиент: {client_telegram_id}")
+        else:
+            logger.info(f"🔄 Повторный клиент: {client_telegram_id}")
+
+        return is_new
     except Exception as e:
         logger.error(f"Ошибка проверки клиента: {e}")
         return True  # По умолчанию считаем новым
