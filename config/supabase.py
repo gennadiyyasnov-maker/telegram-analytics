@@ -64,62 +64,91 @@ async def is_new_client(client_telegram_id: int, manager_id: str, hours: int = 2
     """
     Проверить, новый ли это клиент
 
-    ПРАВИЛЬНАЯ ЛОГИКА:
-    1. Проверяем реальную историю переписок в Telegram
-    2. Если есть хоть одно сообщение в истории (кроме текущего) - это ПОВТОРНЫЙ клиент
-    3. Если история пустая или только одно сообщение - это НОВЫЙ клиент
+    ГИБРИДНЫЙ ПОДХОД (БД + Telegram):
+    1. Проверяем таблицу telegram_client_first_seen (primary source)
+    2. Если есть запись - сравниваем дату первого контакта с сегодня
+    3. Если нет записи - проверяем Telegram API и создаем запись
+    4. Fallback на старую логику если всё недоступно
 
     Параметры:
     - client_telegram_id: ID клиента
-    - manager_id: ID менеджера (не используется для Telegram, но для логов)
-    - hours: не используется в новой логике
+    - manager_id: ID менеджера
+    - hours: не используется
     - telegram_client: клиент Telethon для проверки истории
     """
     try:
+        from datetime import datetime, time
+
+        today = datetime.now().date().isoformat()
+        today_start = datetime.combine(datetime.now().date(), time.min)
+
+        # ШАГ 1: Проверяем БД (быстро и надежно)
+        first_seen = await get_first_seen(client_telegram_id, manager_id)
+
+        if first_seen:
+            # Уже есть запись в БД - это источник истины
+            first_date = first_seen['first_seen_date']
+            is_new = (first_date == today)
+
+            logger.info(f"📦 БД: клиент {client_telegram_id} впервые писал {first_date}, сегодня {today} → {'НОВЫЙ' if is_new else 'ПОВТОРНЫЙ'}")
+            return is_new
+
+        # ШАГ 2: Нет в БД - первый раз видим этого клиента
+        logger.info(f"🔍 Первая встреча с клиентом {client_telegram_id}, проверяем Telegram историю...")
+
         if not telegram_client:
-            logger.warning("⚠️ Telegram client не передан, проверяем по БД")
-            # Fallback на старую логику если клиент не передан
-            result = supabase.table('telegram_conversations').select('id').eq(
-                'client_telegram_id', client_telegram_id
-            ).eq('manager_id', manager_id).limit(1).execute()
-            is_new = len(result.data) == 0
-        else:
-            # НОВАЯ ЛОГИКА: Проверяем реальную историю в Telegram
-            try:
-                from datetime import datetime, time
+            logger.warning("⚠️ Telegram client не передан, считаем новым")
+            # Сохраняем в БД как нового
+            await save_first_seen(client_telegram_id, manager_id, datetime.now())
+            return True
 
-                # Получаем начало текущего дня (00:00:00)
-                today_start = datetime.combine(datetime.now().date(), time.min)
+        # ШАГ 3: Проверяем реальную историю в Telegram
+        try:
+            # Получаем последние 100 сообщений из истории (увеличили лимит)
+            all_messages = await telegram_client.get_messages(client_telegram_id, limit=100)
 
-                # Получаем все сообщения из истории (последние 50)
-                all_messages = await telegram_client.get_messages(client_telegram_id, limit=50)
+            if len(all_messages) == 0:
+                # Нет истории вообще - точно новый
+                logger.info(f"🆕 Новый клиент {client_telegram_id}: история пустая")
+                await save_first_seen(client_telegram_id, manager_id, datetime.now())
+                return True
 
-                # Фильтруем сообщения ДО сегодняшнего дня
-                messages_before_today = [
-                    msg for msg in all_messages
-                    if msg.date.replace(tzinfo=None) < today_start
-                ]
+            # Фильтруем сообщения ДО сегодняшнего дня
+            messages_before_today = [
+                msg for msg in all_messages
+                if msg.date.replace(tzinfo=None) < today_start
+            ]
 
-                # Если нашли хоть одно сообщение до сегодня - повторный клиент
-                # Если все сообщения только сегодняшние или нет сообщений - новый клиент
-                is_new = len(messages_before_today) == 0
+            # Определяем статус
+            is_new = len(messages_before_today) == 0
 
-                if is_new:
-                    logger.info(f"🆕 Новый клиент {client_telegram_id}: нет сообщений до {today_start}, всего сообщений: {len(all_messages)}")
-                else:
-                    logger.info(f"🔄 Повторный клиент {client_telegram_id}: найдено {len(messages_before_today)} сообщений до {today_start}")
+            # Определяем дату первого контакта
+            if is_new:
+                # Все сообщения сегодняшние - первый контакт сегодня
+                first_contact_time = datetime.now()
+                logger.info(f"🆕 Новый клиент {client_telegram_id}: нет сообщений до {today_start}, всего: {len(all_messages)}")
+            else:
+                # Есть старые сообщения - первый контакт был раньше
+                # Берем самое старое сообщение как дату первого контакта
+                oldest_message = all_messages[-1]  # Последнее в списке = самое старое
+                first_contact_time = oldest_message.date.replace(tzinfo=None)
+                logger.info(f"🔄 Повторный клиент {client_telegram_id}: найдено {len(messages_before_today)} сообщений до {today_start}, первый контакт: {first_contact_time.date()}")
 
-            except Exception as telegram_error:
-                logger.warning(f"⚠️ Не удалось получить историю из Telegram для {client_telegram_id}: {telegram_error}")
-                # Fallback на проверку по БД
-                result = supabase.table('telegram_conversations').select('id').eq(
-                    'client_telegram_id', client_telegram_id
-                ).eq('manager_id', manager_id).limit(1).execute()
-                is_new = len(result.data) == 0
+            # ВАЖНО: Сохраняем в БД для будущих проверок
+            await save_first_seen(client_telegram_id, manager_id, first_contact_time)
 
-        return is_new
+            return is_new
+
+        except Exception as telegram_error:
+            logger.warning(f"⚠️ Не удалось получить историю из Telegram для {client_telegram_id}: {telegram_error}")
+            # Не можем проверить - считаем новым и сохраняем
+            await save_first_seen(client_telegram_id, manager_id, datetime.now())
+            return True
+
     except Exception as e:
-        logger.error(f"Ошибка проверки клиента: {e}")
+        logger.error(f"❌ Ошибка проверки клиента: {e}")
+        import traceback
+        traceback.print_exc()
         return True  # По умолчанию считаем новым
 
 logger.info("✅ Supabase клиент инициализирован")
