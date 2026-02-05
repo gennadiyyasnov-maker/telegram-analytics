@@ -86,17 +86,28 @@ async def is_new_client(client_telegram_id: int, manager_id: str, hours: int = 2
         else:
             # НОВАЯ ЛОГИКА: Проверяем реальную историю в Telegram
             try:
-                # Получаем последние 2 сообщения из чата с этим клиентом
-                messages = await telegram_client.get_messages(client_telegram_id, limit=2)
+                from datetime import datetime, time
 
-                # Если сообщений меньше 2 (только текущее или вообще нет) - новый клиент
-                # Если 2 или больше - уже была переписка, значит повторный
-                is_new = len(messages) < 2
+                # Получаем начало текущего дня (00:00:00)
+                today_start = datetime.combine(datetime.now().date(), time.min)
+
+                # Получаем все сообщения из истории (последние 50)
+                all_messages = await telegram_client.get_messages(client_telegram_id, limit=50)
+
+                # Фильтруем сообщения ДО сегодняшнего дня
+                messages_before_today = [
+                    msg for msg in all_messages
+                    if msg.date.replace(tzinfo=None) < today_start
+                ]
+
+                # Если нашли хоть одно сообщение до сегодня - повторный клиент
+                # Если все сообщения только сегодняшние или нет сообщений - новый клиент
+                is_new = len(messages_before_today) == 0
 
                 if is_new:
-                    logger.info(f"🆕 Новый клиент {client_telegram_id}: только {len(messages)} сообщение(й) в истории")
+                    logger.info(f"🆕 Новый клиент {client_telegram_id}: нет сообщений до {today_start}, всего сообщений: {len(all_messages)}")
                 else:
-                    logger.info(f"🔄 Повторный клиент {client_telegram_id}: {len(messages)}+ сообщений в истории")
+                    logger.info(f"🔄 Повторный клиент {client_telegram_id}: найдено {len(messages_before_today)} сообщений до {today_start}")
 
             except Exception as telegram_error:
                 logger.warning(f"⚠️ Не удалось получить историю из Telegram для {client_telegram_id}: {telegram_error}")
